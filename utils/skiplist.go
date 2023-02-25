@@ -101,27 +101,23 @@ func (s *Skiplist) DecrRef() {
 }
 
 func newNode(arena *Arena, key []byte, v ValueStruct, height int) *node {
-	// The base level is already allocated in the node struct.
-	nodeOffset := arena.putNode(height)
-	keyOffset := arena.putKey(key)
-	val := encodeValue(arena.putVal(v), v.EncodedSize())
+	nodeOff := arena.putNode(height)
+	node := arena.getNode(nodeOff)
 
-	node := arena.getNode(nodeOffset)
-	node.keyOffset = keyOffset
-	node.keySize = uint16(len(key))
 	node.height = uint16(height)
-	node.value = val
+	node.keySize = uint16(len(key))
+	node.keyOffset = arena.putKey(key)
+	node.value = encodeValue(arena.putVal(v), v.EncodedSize())
+
 	return node
 }
 
 func encodeValue(valOffset uint32, valSize uint32) uint64 {
-	return uint64(valSize)<<32 | uint64(valOffset)
+	return (uint64(valSize) << 32) | uint64(valOffset)
 }
 
 func decodeValue(value uint64) (valOffset uint32, valSize uint32) {
-	valOffset = uint32(value)
-	valSize = uint32(value >> 32)
-	return
+	return uint32(value), uint32(value >> 32)
 }
 
 // NewSkiplist makes a new empty skiplist, with a given arena size
@@ -138,8 +134,8 @@ func NewSkiplist(arenaSize int64) *Skiplist {
 }
 
 func (n *node) getValueOffset() (uint32, uint32) {
-	value := atomic.LoadUint64(&n.value)
-	return decodeValue(value)
+	val := atomic.LoadUint64(&n.value)
+	return decodeValue(val)
 }
 
 func (n *node) key(arena *Arena) []byte {
@@ -160,8 +156,7 @@ func (n *node) casNextOffset(h int, old, val uint32) bool {
 
 // getVs return ValueStruct stored in node
 func (n *node) getVs(arena *Arena) ValueStruct {
-	valOffset, valSize := n.getValueOffset()
-	return arena.getVal(valOffset, valSize)
+	return arena.getVal(n.getValueOffset())
 }
 
 // Returns true if key is strictly > n.key.
@@ -180,7 +175,8 @@ func (s *Skiplist) randomHeight() int {
 }
 
 func (s *Skiplist) getNext(nd *node, height int) *node {
-	return s.arena.getNode(nd.getNextOffset(height))
+	nextOffset := nd.getNextOffset(height)
+	return s.arena.getNode(nextOffset)
 }
 
 func (s *Skiplist) getHead() *node {
@@ -194,70 +190,63 @@ func (s *Skiplist) getHead() *node {
 // node.key >= key (if allowEqual=true).
 // Returns the node found. The bool returned is true if the node has key equal to given key.
 func (s *Skiplist) findNear(key []byte, less bool, allowEqual bool) (*node, bool) {
-	x := s.getHead()
+	prev := s.getHead()
 	level := int(s.getHeight() - 1)
+
 	for {
-		// Assume x.key < key.
-		next := s.getNext(x, level)
+		next := s.getNext(prev, level)
 		if next == nil {
-			// x.key < key < END OF LIST
-			if level > 0 {
-				// Can descend further to iterate closer to the end.
+			if level != 0 {
 				level--
 				continue
 			}
-			// Level=0. Cannot descend further. Let's return something that makes sense.
 			if !less {
 				return nil, false
 			}
-			// Try to return x. Make sure it is not a head node.
-			if x == s.getHead() {
+
+			if prev == s.getHead() {
 				return nil, false
 			}
-			return x, false
+
+			return prev, true
 		}
 
-		nextKey := next.key(s.arena)
-		cmp := CompareKeys(key, nextKey)
-		if cmp > 0 {
-			// x.key < next.key < key. We can continue to move right.
-			x = next
-			continue
-		}
-		if cmp == 0 {
-			// x.key < key == next.key.
+		switch CompareKeys(key, next.key(s.arena)) {
+		case 0:
 			if allowEqual {
 				return next, true
 			}
+
 			if !less {
-				// We want >, so go to base level to grab the next bigger note.
 				return s.getNext(next, 0), false
 			}
-			// We want <. If not base level, we should go closer in the next level.
-			if level > 0 {
+
+			if level != 0 {
 				level--
 				continue
 			}
-			// On base level. Return x.
-			if x == s.getHead() {
+
+			if prev == s.getHead() {
 				return nil, false
 			}
-			return x, false
+			return prev, true
+		case -1:
+			if level != 0 {
+				level--
+				continue
+			}
+
+			if !less {
+				return next, false
+			}
+
+			if prev == s.getHead() {
+				return nil, false
+			}
+			return prev, true
+		default:
+			prev = next
 		}
-		// cmp < 0. In other words, x.key < key < next.
-		if level > 0 {
-			level--
-			continue
-		}
-		// At base level. Need to return something.
-		if !less {
-			return next, false
-		}
-		// Try to return x. Make sure it is not a head node.
-		if x == s.getHead() {
-			return nil, false
-		}
-		return x, false
 	}
 }
 
@@ -267,24 +256,21 @@ func (s *Skiplist) findNear(key []byte, less bool, allowEqual bool) (*node, bool
 // Otherwise, outBefore.key < key < outAfter.key.
 func (s *Skiplist) findSpliceForLevel(key []byte, before uint32, level int) (uint32, uint32) {
 	for {
-		// Assume before.key < key.
-		beforeNode := s.arena.getNode(before)
-		next := beforeNode.getNextOffset(level)
-		nextNode := s.arena.getNode(next)
-		if nextNode == nil {
-			return before, next
+		prev := s.arena.getNode(before)
+		next := s.getNext(prev, level)
+		if next == nil {
+			return before, prev.getNextOffset(level)
 		}
-		nextKey := nextNode.key(s.arena)
-		cmp := CompareKeys(key, nextKey)
-		if cmp == 0 {
-			// Equality case.
-			return next, next
+
+		switch CompareKeys(key, next.key(s.arena)) {
+		case 0:
+			off := prev.getNextOffset(level)
+			return off, off
+		case 1:
+			before = prev.getNextOffset(level)
+		case -1:
+			return before, prev.getNextOffset(level)
 		}
-		if cmp < 0 {
-			// before.key < key < next.key. We are done for this level.
-			return before, next
-		}
-		before = next // Keep moving right on this level.
 	}
 }
 
@@ -294,76 +280,66 @@ func (s *Skiplist) getHeight() int32 {
 
 // Put inserts the key-value pair.
 func (s *Skiplist) Add(e *Entry) {
-	// Since we allow overwrite, we may not need to create a new node. We might not even need to
-	// increase the height. Let's defer these actions.
-	key, v := e.Key, ValueStruct{
+	key, valueStruct := e.Key, ValueStruct{
 		Meta:      e.Meta,
 		Value:     e.Value,
 		ExpiresAt: e.ExpiresAt,
 		Version:   e.Version,
 	}
 
-	listHeight := s.getHeight()
-	var prev [maxHeight + 1]uint32
-	var next [maxHeight + 1]uint32
-	prev[listHeight] = s.headOffset
-	for i := int(listHeight) - 1; i >= 0; i-- {
-		// Use higher level to speed up for current level.
-		prev[i], next[i] = s.findSpliceForLevel(key, prev[i+1], i)
-		if prev[i] == next[i] {
-			vo := s.arena.putVal(v)
-			encValue := encodeValue(vo, v.EncodedSize())
-			prevNode := s.arena.getNode(prev[i])
-			prevNode.setValue(s.arena, encValue)
+	currentHeight := int(s.getHeight())
+	left := make([]uint32, maxHeight+1)
+	right := make([]uint32, maxHeight+1)
+	left[currentHeight] = s.headOffset
+
+	for h := currentHeight - 1; h >= 0; h-- {
+		left[h], right[h] = s.findSpliceForLevel(key, left[h+1], h)
+		if left[h] == right[h] {
+			vOff := s.arena.putVal(valueStruct)
+			vSize := valueStruct.EncodedSize()
+			node := s.arena.getNode(left[h])
+			node.setValue(s.arena, encodeValue(vOff, vSize))
 			return
 		}
 	}
 
-	// We do need to create a new node.
-	height := s.randomHeight()
-	x := newNode(s.arena, key, v, height)
-
-	// Try to increase s.height via CAS.
-	listHeight = s.getHeight()
-	for height > int(listHeight) {
-		if atomic.CompareAndSwapInt32(&s.height, listHeight, int32(height)) {
-			// Successfully increased skiplist.height.
+	height := s.getHeight()
+	newHeight := int32(s.randomHeight())
+	for newHeight > height {
+		if atomic.CompareAndSwapInt32(&s.height, height, newHeight) {
 			break
 		}
-		listHeight = s.getHeight()
+		height = s.getHeight()
 	}
 
-	// We always insert from the base level and up. After you add a node in base level, we cannot
-	// create a node in the level above because it would have discovered the node in the base level.
-	for i := 0; i < height; i++ {
-		for {
-			if s.arena.getNode(prev[i]) == nil {
-				AssertTrue(i > 1) // This cannot happen in base level.
-				// We haven't computed prev, next for this level because height exceeds old listHeight.
-				// For these levels, we expect the lists to be sparse, so we can just search from head.
-				prev[i], next[i] = s.findSpliceForLevel(key, s.headOffset, i)
-				// Someone adds the exact same key before we are able to do so. This can only happen on
-				// the base level. But we know we are not on the base level.
-				AssertTrue(prev[i] != next[i])
-			}
-			x.tower[i] = next[i]
-			pnode := s.arena.getNode(prev[i])
-			if pnode.casNextOffset(i, next[i], s.arena.getNodeOffset(x)) {
-				// Managed to insert x between prev[i] and next[i]. Go to the next level.
-				break
-			}
-			// CAS failed. We need to recompute prev and next.
-			// It is unlikely to be helpful to try to use a different level as we redo the search,
-			// because it is unlikely that lots of nodes are inserted between prev[i] and next[i].
-			prev[i], next[i] = s.findSpliceForLevel(key, prev[i], i)
-			if prev[i] == next[i] {
-				AssertTruef(i == 0, "Equality can happen only on base level: %d", i)
-				vo := s.arena.putVal(v)
-				encValue := encodeValue(vo, v.EncodedSize())
-				prevNode := s.arena.getNode(prev[i])
-				prevNode.setValue(s.arena, encValue)
-				return
-			}
+	newN := newNode(s.arena, key, valueStruct, int(newHeight))
+
+	insertHeight := 0
+	for insertHeight < int(newHeight) {
+		if s.arena.getNode(left[insertHeight]) == nil {
+			AssertTrue(insertHeight > 1) // This cannot happen in base level.
+			// We haven't computed prev, next for this level because height exceeds old listHeight.
+			// For these levels, we expect the lists to be sparse, so we can just search from head.
+			left[insertHeight], right[insertHeight] = s.findSpliceForLevel(key, s.headOffset, insertHeight)
+			// Someone adds the exact same key before we are able to do so. This can only happen on
+			// the base level. But we know we are not on the base level.
+			AssertTrue(left[insertHeight] != right[insertHeight])
+		}
+
+		prev := s.arena.getNode(left[insertHeight])
+		newN.tower[insertHeight] = right[insertHeight]
+		if prev.casNextOffset(insertHeight, right[insertHeight], s.arena.getNodeOffset(newN)) {
+			insertHeight++
+			continue
+		}
+
+		left[insertHeight], right[insertHeight] = s.findSpliceForLevel(key, left[insertHeight], insertHeight)
+		if right[insertHeight] == left[insertHeight] {
+			vOff := s.arena.putVal(valueStruct)
+			vSize := valueStruct.EncodedSize()
+			prevNode := s.arena.getNode(left[insertHeight])
+			prevNode.setValue(s.arena, encodeValue(vOff, vSize))
+			return
 		}
 	}
 }
@@ -376,40 +352,35 @@ func (s *Skiplist) Empty() bool {
 // findLast returns the last element. If head (empty list), we return nil. All the find functions
 // will NEVER return the head nodes.
 func (s *Skiplist) findLast() *node {
-	n := s.getHead()
-	level := int(s.getHeight()) - 1
+	currentHeight := int(s.getHeight() - 1)
+	prev := s.getHead()
 	for {
-		next := s.getNext(n, level)
+		next := s.getNext(prev, currentHeight)
 		if next != nil {
-			n = next
+			prev = next
+		}
+		if currentHeight != 0 {
+			currentHeight--
 			continue
 		}
-		if level == 0 {
-			if n == s.getHead() {
-				return nil
-			}
-			return n
+		if prev == s.getHead() {
+			return nil
 		}
-		level--
+		return prev
 	}
 }
 
 // Get gets the value associated with the key. It returns a valid value if it finds equal or earlier
 // version of the same key.
 func (s *Skiplist) Search(key []byte) ValueStruct {
-	n, _ := s.findNear(key, false, true) // findGreaterOrEqual.
-	if n == nil {
+	target, result := s.findNear(key, false, true)
+	if !result {
 		return ValueStruct{}
 	}
-
-	nextKey := s.arena.getKey(n.keyOffset, n.keySize)
-	if !SameKey(key, nextKey) {
+	if !SameKey(target.key(s.arena), key) {
 		return ValueStruct{}
 	}
-
-	valOffset, valSize := n.getValueOffset()
-	vs := s.arena.getVal(valOffset, valSize)
-	return vs
+	return target.getVs(s.arena)
 }
 
 // NewIterator returns a skiplist iterator.  You have to Close() the iterator.
@@ -503,17 +474,18 @@ func (s *SkipListIterator) Close() error {
 }
 
 // Valid returns true iff the iterator is positioned at a valid node.
-func (s *SkipListIterator) Valid() bool { return s.n != nil }
+func (s *SkipListIterator) Valid() bool {
+	return s.n != nil
+}
 
 // Key returns the key at the current position.
 func (s *SkipListIterator) Key() []byte {
-	return s.list.arena.getKey(s.n.keyOffset, s.n.keySize)
+	return s.n.key(s.list.arena)
 }
 
 // Value returns value.
 func (s *SkipListIterator) Value() ValueStruct {
-	valOffset, valSize := s.n.getValueOffset()
-	return s.list.arena.getVal(valOffset, valSize)
+	return s.n.getVs(s.list.arena)
 }
 
 // ValueUint64 returns the uint64 value of the current node.
@@ -530,17 +502,17 @@ func (s *SkipListIterator) Next() {
 // Prev advances to the previous position.
 func (s *SkipListIterator) Prev() {
 	AssertTrue(s.Valid())
-	s.n, _ = s.list.findNear(s.Key(), true, false) // find <. No equality allowed.
+	s.n, _ = s.list.findNear(s.Key(), true, false)
 }
 
 // Seek advances to the first entry with a key >= target.
 func (s *SkipListIterator) Seek(target []byte) {
-	s.n, _ = s.list.findNear(target, false, true) // find >=.
+	s.n, _ = s.list.findNear(target, false, true)
 }
 
 // SeekForPrev finds an entry with key <= target.
 func (s *SkipListIterator) SeekForPrev(target []byte) {
-	s.n, _ = s.list.findNear(target, true, true) // find <=.
+	s.n, _ = s.list.findNear(target, true, true)
 }
 
 // SeekToFirst seeks position at the first entry in list.

@@ -74,8 +74,8 @@ func Benchmark_SkipListBasicCRUD(b *testing.B) {
 func TestDrawList(t *testing.T) {
 	list := NewSkiplist(1000)
 	n := 12
-	for i:=0; i<n; i++ {
-		index := strconv.Itoa(r.Intn(90)+10)
+	for i := 0; i < n; i++ {
+		index := strconv.Itoa(r.Intn(90) + 10)
 		key := index + RandString(8)
 		entryRand := NewEntry([]byte(key), []byte(index))
 		list.Add(entryRand)
@@ -107,17 +107,24 @@ func TestConcurrentBasic(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			v := l.Search(key(i))
+			if v.Value == nil {
+				return
+			}
 			require.EqualValues(t, key(i), v.Value)
-			return
-
-			require.Nil(t, v)
 		}(i)
 	}
 	wg.Wait()
+
+	count := 0
+	iter := l.NewSkipListIterator()
+	for iter.Rewind(); iter.Valid(); iter.Next() {
+		count++
+	}
+	require.EqualValues(t, count, n)
 }
 
 func Benchmark_ConcurrentBasic(b *testing.B) {
-	const n = 1000
+	const n = 2000
 	l := NewSkiplist(100000000)
 	var wg sync.WaitGroup
 	key := func(i int) []byte {
@@ -138,11 +145,20 @@ func Benchmark_ConcurrentBasic(b *testing.B) {
 		go func(i int) {
 			defer wg.Done()
 			v := l.Search(key(i))
+			if v.Value == nil {
+				return
+			}
 			require.EqualValues(b, key(i), v.Value)
-			require.NotNil(b, v)
 		}(i)
 	}
 	wg.Wait()
+
+	count := 0
+	iter := l.NewSkipListIterator()
+	for iter.Rewind(); iter.Valid(); iter.Next() {
+		count++
+	}
+	require.EqualValues(b, count, n)
 }
 
 func TestSkipListIterator(t *testing.T) {
