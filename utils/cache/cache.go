@@ -66,51 +66,36 @@ func (c *Cache) Set(key interface{}, value interface{}) bool {
 }
 
 func (c *Cache) set(key, value interface{}) bool {
-	// keyHash 用来快速定位，conflice 用来判断冲突
 	keyHash, conflictHash := c.keyToHash(key)
-
-	// 刚放进去的缓存都先放到 window lru 中，所以 stage = 0
-	i := storeItem{
+	si := &storeItem{
 		stage:    0,
 		key:      keyHash,
 		conflict: conflictHash,
 		value:    value,
 	}
 
-	// 如果 window 已满，要返回被淘汰的数据
-	eitem, evicted := c.lru.add(i)
-
-	if !evicted {
+	eitem, isEvict := c.lru.add(si)
+	if !isEvict {
 		return true
 	}
 
-	// 如果 window 中有被淘汰的数据，会走到这里
-	// 需要从 LFU 的 stageOne 部分找到一个淘汰者
-	// 二者进行 PK
-	victim := c.slru.victim()
-
-	// 走到这里是因为 LFU 未满，那么 window lru 的淘汰数据，可以进入 stageOne
-	if victim == nil {
+	slruVictim := c.slru.victim()
+	if slruVictim == nil {
 		c.slru.add(eitem)
 		return true
 	}
 
-	// 这里进行 PK，必须在 bloomfilter 中出现过一次，才允许 PK
-	// 在 bf 中出现，说明访问频率 >= 2
 	if !c.door.Allow(uint32(eitem.key)) {
 		return true
 	}
 
-	// 估算 windowlru 和 LFU 中淘汰数据，历史访问频次
-	// 访问频率高的，被认为更有资格留下来
-	vcount := c.c.Estimate(victim.key)
-	ocount := c.c.Estimate(eitem.key)
+	eCount := c.c.Estimate(eitem.key)
+	vCount := c.c.Estimate(slruVictim.key)
 
-	if ocount < vcount {
+	if eCount < vCount {
 		return true
 	}
 
-	// 留下来的人进入 stageOne
 	c.slru.add(eitem)
 	return true
 }
@@ -122,42 +107,32 @@ func (c *Cache) Get(key interface{}) (interface{}, bool) {
 }
 
 func (c *Cache) get(key interface{}) (interface{}, bool) {
-	c.t++
-	if c.t == c.threshold {
-		c.c.Reset()
-		c.door.reset()
-		c.t = 0
-	}
-
 	keyHash, conflictHash := c.keyToHash(key)
+	item, ok := c.data[keyHash]
 
-	val, ok := c.data[keyHash]
 	if !ok {
 		c.door.Allow(uint32(keyHash))
 		c.c.Increment(keyHash)
 		return nil, false
 	}
 
-	item := val.Value.(*storeItem)
-
-	if item.conflict != conflictHash {
+	itemVal := item.Value.(*storeItem)
+	if conflictHash != itemVal.conflict {
 		c.door.Allow(uint32(keyHash))
 		c.c.Increment(keyHash)
 		return nil, false
 	}
+
 	c.door.Allow(uint32(keyHash))
-	c.c.Increment(item.key)
+	c.c.Increment(keyHash)
 
-	v := item.value
-
-	if item.stage == 0 {
-		c.lru.get(val)
+	if itemVal.stage == 0 {
+		c.lru.get(item)
 	} else {
-		c.slru.get(val)
+		c.slru.get(item)
 	}
 
-	return v, true
-
+	return itemVal.value, true
 }
 
 func (c *Cache) Del(key interface{}) (interface{}, bool) {
