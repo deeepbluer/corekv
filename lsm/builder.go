@@ -15,7 +15,6 @@ package lsm
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"github.com/hardcore-os/corekv/file"
 	"github.com/hardcore-os/corekv/pb"
@@ -77,6 +76,26 @@ func (h header) encode() []byte {
 	return b[:]
 }
 
+func (tb *tableBuilder) AddKey(entry *utils.Entry) {
+	tb.add(entry, false)
+}
+
+func (tb *tableBuilder) AddStaleKey(entry *utils.Entry) {
+	tb.add(entry, true)
+}
+
+func (tb *tableBuilder) Close() {
+
+}
+
+func (tb *tableBuilder) finish() []byte {
+	bd := tb.done()
+	buf := make([]byte, bd.size)
+	written := bd.Copy(buf)
+	utils.CondPanic(written == len(buf), nil)
+	return buf
+}
+
 func (tb *tableBuilder) add(entry *utils.Entry, isStale bool) {
 	key := entry.Key
 	value := &utils.ValueStruct{
@@ -125,6 +144,11 @@ func calculateDiffKey(baseKey []byte, curKey []byte) ([]byte, int) {
 	return curKey[index+1:], index + 1
 }
 
+func (tb *tableBuilder) calculateChecksum(data []byte) []byte {
+	checkSum := utils.CalculateChecksum(data)
+	return utils.U64ToBytes(checkSum)
+}
+
 func (tb *tableBuilder) finishBlock() {
 	curBlk := tb.curBlock
 	if curBlk == nil {
@@ -135,13 +159,13 @@ func (tb *tableBuilder) finishBlock() {
 	tb.append(bytedOffset)
 	tb.append(utils.U32ToBytes(uint32(len(curBlk.entryOffsets))))
 
-	checkSum := utils.CalculateChecksum(curBlk.data)
-	bytedCheckSum := utils.U32ToBytes(uint32(checkSum))
-	sumLen := len(bytedCheckSum)
-	tb.append(bytedCheckSum)
-	tb.append(utils.U32ToBytes(uint32(sumLen)))
+	checkSum := tb.calculateChecksum(tb.curBlock.data[:tb.curBlock.end])
+	tb.append(checkSum)
+	tb.append(utils.U32ToBytes(uint32(len(checkSum))))
 
 	tb.estimateSz += curBlk.estimateSz
+	curBlk.checksum = checkSum
+	curBlk.data = curBlk.data[:curBlk.end]
 	tb.blockList = append(tb.blockList, curBlk)
 	tb.keyCount += uint32(len(curBlk.entryOffsets))
 	tb.curBlock = nil
@@ -165,7 +189,7 @@ func (tb *tableBuilder) allocate(data []byte) int {
 		curBlk.data = tmp
 	}
 	curBlk.end += need
-	return copy(curBlk.data[curBlk.end:], data)
+	return copy(curBlk.data[curBlk.end-need:curBlk.end], data)
 }
 
 func (tb *tableBuilder) tryFinishBlock(e *utils.Entry) bool {
@@ -244,48 +268,48 @@ func (tb *tableBuilder) done() *buildData {
 		f = utils.NewFilter(tb.keyHashes, bits)
 	}
 
-	indexData, dataSize := tb.buildIndexBlock(f)
+	indexData, dataSize := tb.buildIndex(f)
 	bd.index = indexData
 
-	bd.checksum = utils.U64ToBytes(utils.CalculateChecksum(indexData))
+	bd.checksum = tb.calculateChecksum(indexData)
 	bd.size = int(dataSize) + len(indexData) + len(bd.checksum) + 4 + 4
 	return bd
 }
 
-func (tb *tableBuilder) buildIndexBlock(filter []byte) ([]byte, uint32) {
+func (tb *tableBuilder) buildIndex(bloom []byte) ([]byte, uint32) {
 	tableIndex := &pb.TableIndex{}
-	if len(filter) > 0 {
-		tableIndex.BloomFilter = filter
+	if len(bloom) > 0 {
+		tableIndex.BloomFilter = bloom
 	}
-
-	tableIndex.MaxVersion = tb.maxVersion
 	tableIndex.KeyCount = tb.keyCount
-	tableIndex.Offsets = tb.buildOffsetList()
-
+	tableIndex.MaxVersion = tb.maxVersion
+	tableIndex.Offsets = tb.writeBlockOffsets(tableIndex)
 	var dataSize uint32
-	for _, b := range tb.blockList {
-		dataSize += uint32(b.end)
+	for i := range tb.blockList {
+		dataSize += uint32(tb.blockList[i].end)
 	}
-
-	rawTbIndex, err := json.Marshal(tableIndex)
+	data, err := tableIndex.Marshal()
 	utils.Panic(err)
-
-	return rawTbIndex, dataSize
+	return data, dataSize
 }
 
-func (tb *tableBuilder) buildOffsetList() []*pb.BlockOffset {
-	var res []*pb.BlockOffset
-	offset := uint32(0)
-	for _, b := range tb.blockList {
-		bo := &pb.BlockOffset{
-			Key:    b.baseKey,
-			Offset: offset,
-			Len:    uint32(b.end),
-		}
-		res = append(res, bo)
-		offset += uint32(b.end)
+func (tb *tableBuilder) writeBlockOffsets(tableIndex *pb.TableIndex) []*pb.BlockOffset {
+	var startOffset uint32
+	var offsets []*pb.BlockOffset
+	for _, bl := range tb.blockList {
+		offset := tb.writeBlockOffset(bl, startOffset)
+		offsets = append(offsets, offset)
+		startOffset += uint32(bl.end)
 	}
-	return res
+	return offsets
+}
+
+func (b *tableBuilder) writeBlockOffset(bl *block, startOffset uint32) *pb.BlockOffset {
+	offset := &pb.BlockOffset{}
+	offset.Key = bl.baseKey
+	offset.Len = uint32(bl.end)
+	offset.Offset = startOffset
+	return offset
 }
 
 func (b *tableBuilder) ReachedCapacity() bool {
