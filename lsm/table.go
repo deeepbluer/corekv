@@ -128,8 +128,8 @@ func (t *table) block(idx int) (*block, error) {
 	startOffsets := readPos - 4*entriesLen
 	endOffsets := startOffsets + 4*entriesLen
 
-	b.entriesIndexStart = startOffsets
-	b.entryOffsets = utils.BytesToU32Slice(bk.data[startOffsets:endOffsets])
+	bk.entriesIndexStart = startOffsets
+	bk.entryOffsets = utils.BytesToU32Slice(bk.data[startOffsets:endOffsets])
 
 	t.lm.cache.blocks.Set(key, bk)
 	return bk, nil
@@ -141,7 +141,7 @@ func (t *table) Serach(key []byte, maxVs *uint64) (entry *utils.Entry, err error
 
 	indexs := t.ss.Indexs()
 	filter := utils.Filter(indexs.BloomFilter)
-	if !filter.MayContainKey(key) {
+	if t.ss.HasBloomFilter() && !filter.MayContainKey(key) {
 		return nil, utils.ErrKeyNotFound
 	}
 
@@ -357,7 +357,7 @@ func (it *tableIterator) Seek(key []byte) {
 		if idx == len(it.t.ss.Indexs().Offsets) {
 			return true
 		}
-		return utils.CompareKeys(offset.Key, key) > 0
+		return utils.CompareKeys(offset.GetKey(), key) > 0
 	})
 
 	if idx == 0 {

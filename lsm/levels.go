@@ -129,9 +129,11 @@ func (lm *levelManager) flush(immutable *memTable) (err error) {
 	// 构建一个 builder
 	builder := newTableBuiler(lm.opt)
 	iter := immutable.sl.NewSkipListIterator()
+	count := 0
 	for iter.Rewind(); iter.Valid(); iter.Next() {
 		entry := iter.Item().Entry()
 		builder.add(entry, false)
+		count++
 	}
 	// 创建一个 table 对象
 	table := openTable(lm, sstName, builder)

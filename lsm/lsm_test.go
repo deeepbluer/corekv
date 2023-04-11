@@ -234,7 +234,7 @@ func baseTest(t *testing.T, lsm *LSM, n int) {
 
 	// 随机构建数据进行测试
 	lsm.Set(e)
-	for i := 1; i < n; i++ {
+	for i := 1; i < 128; i++ {
 		ee := utils.BuildEntry()
 		lsm.Set(ee)
 		// caseList = append(caseList, ee)
