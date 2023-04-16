@@ -28,7 +28,7 @@ func newSLRU(data map[uint64]*list.Element, stageOneCap, stageTwoCap int) *segme
 
 func (slru *segmentedLRU) add(newitem storeItem) {
 	newitem.stage = STAGE_ONE
-	if slru.stageOne.Len() < slru.stageOneCap || slru.stageOne.Len() + slru.stageTwo.Len() < slru.stageOneCap + slru.stageTwoCap {
+	if slru.stageOne.Len() < slru.stageOneCap || slru.stageOne.Len()+slru.stageTwo.Len() < slru.stageOneCap+slru.stageTwoCap {
 		slru.data[newitem.key] = slru.stageOne.PushFront(&newitem)
 		return
 	}
@@ -79,11 +79,16 @@ func (slru *segmentedLRU) Len() int {
 }
 
 func (slru *segmentedLRU) victim() *storeItem {
-	if slru.Len() == 0 {
+	//如果 slru 的容量未满，不需要淘汰
+	if slru.Len() < slru.stageOneCap+slru.stageTwoCap {
 		return nil
 	}
 
 	oneBackEle := slru.stageOne.Back()
+	if oneBackEle == nil {
+		a := slru.String()
+		fmt.Println(a)
+	}
 	return oneBackEle.Value.(*storeItem)
 }
 
