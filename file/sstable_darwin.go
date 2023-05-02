@@ -1,5 +1,5 @@
-//go:build linux
-// +build linux
+//go:build darwin
+// +build darwin
 
 // Copyright 2021 hardcore-os Project Authors
 //
@@ -61,7 +61,7 @@ func (ss *SSTable) Init() error {
 	// 从文件中获取创建时间
 	stat, _ := ss.f.Fd.Stat()
 	statType := stat.Sys().(*syscall.Stat_t)
-	ss.createdAt = time.Unix(statType.Ctim.Sec, statType.Ctim.Nsec)
+	ss.createdAt = time.Unix(statType.Atimespec.Sec, statType.Atimespec.Nsec)
 	// init min key
 	keyBytes := ko.GetKey()
 	minKey := make([]byte, len(keyBytes))
