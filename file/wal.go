@@ -17,14 +17,13 @@ package file
 import (
 	"bufio"
 	"bytes"
-	"fmt"
+	"github.com/pkg/errors"
 	"hash/crc32"
 	"io"
 	"os"
 	"sync"
 
 	"github.com/hardcore-os/corekv/utils"
-	"github.com/pkg/errors"
 )
 
 // WalFile _
@@ -44,11 +43,10 @@ func (wf *WalFile) Fid() uint64 {
 
 // Close _
 func (wf *WalFile) Close() error {
-	fileName := wf.f.Fd.Name()
 	if err := wf.f.Close(); err != nil {
 		return err
 	}
-	return os.Remove(fileName)
+	return os.Remove(wf.f.Fd.Name())
 }
 
 // Name _
@@ -72,54 +70,51 @@ func OpenWalFile(opt *Options) *WalFile {
 }
 
 func (wf *WalFile) Write(entry *utils.Entry) error {
-	// 落预写日志简单的同步写即可
-	// 序列化为磁盘结构
 	wf.lock.Lock()
-	plen := utils.WalCodec(wf.buf, entry)
-	buf := wf.buf.Bytes()
-	utils.Panic(wf.f.AppendBuffer(wf.writeAt, buf))
-	wf.writeAt += uint32(plen)
-	wf.lock.Unlock()
+	defer wf.lock.Unlock()
+
+	sz := utils.WalCodec(wf.buf, entry)
+	utils.Panic(wf.f.AppendBuffer(wf.writeAt, wf.buf.Bytes()[:]))
+	wf.writeAt += uint32(sz)
 	return nil
 }
 
 // Iterate 从磁盘中遍历wal，获得数据
 func (wf *WalFile) Iterate(readOnly bool, offset uint32, fn utils.LogEntry) (uint32, error) {
-	// For now, read directly from file, because it allows
 	reader := bufio.NewReader(wf.f.NewReader(int(offset)))
-	read := SafeRead{
+	sRead := &SafeRead{
 		K:            make([]byte, 10),
 		V:            make([]byte, 10),
 		RecordOffset: offset,
 		LF:           wf,
 	}
-	var validEndOffset uint32 = offset
-loop:
+	validOffset := offset
 	for {
-		e, err := read.MakeEntry(reader)
+		entry, err := sRead.MakeEntry(reader)
+
 		switch {
 		case err == io.EOF:
-			break loop
+			break
 		case err == io.ErrUnexpectedEOF || err == utils.ErrTruncate:
-			break loop
+			break
 		case err != nil:
-			return 0, err
-		case e.IsZero():
-			break loop
+			return 0, nil
+		case entry.IsZero():
+			break
 		}
 
-		var vp utils.ValuePtr // 给kv分离的设计留下扩展,可以不用考虑其作用
-		size := uint32(int(e.LogHeaderLen()) + len(e.Key) + len(e.Value) + crc32.Size)
-		read.RecordOffset += size
-		validEndOffset = read.RecordOffset
-		if err := fn(e, &vp); err != nil {
+		var valPtr *utils.ValuePtr
+		size := uint32(int(entry.LogHeaderLen()) + len(entry.Key) + len(entry.Value) + crc32.Size)
+		sRead.RecordOffset += size
+		validOffset = sRead.RecordOffset
+		if err = fn(entry, valPtr); err != nil {
 			if err == utils.ErrStop {
 				break
 			}
 			return 0, errors.WithMessage(err, "Iteration function")
 		}
 	}
-	return validEndOffset, nil
+	return validOffset, nil
 }
 
 // Truncate _
@@ -128,9 +123,11 @@ func (wf *WalFile) Truncate(end int64) error {
 	if end <= 0 {
 		return nil
 	}
-	if fi, err := wf.f.Fd.Stat(); err != nil {
-		return fmt.Errorf("while file.stat on file: %s, error: %v\n", wf.Name(), err)
-	} else if fi.Size() == end {
+	fileInfo, err := wf.f.Fd.Stat()
+	if err != nil {
+		return err
+	}
+	if fileInfo.Size() == end {
 		return nil
 	}
 	wf.size = uint32(end)

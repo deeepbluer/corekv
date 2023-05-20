@@ -36,37 +36,37 @@ const maxHeaderSize int = 21
 
 func (h WalHeader) Encode(out []byte) int {
 	index := 0
-	index = binary.PutUvarint(out[index:], uint64(h.KeyLen))
-	index += binary.PutUvarint(out[index:], uint64(h.ValueLen))
-	index += binary.PutUvarint(out[index:], uint64(h.Meta))
-	index += binary.PutUvarint(out[index:], h.ExpiresAt)
+	index += binary.PutUvarint(out, uint64(h.KeyLen))
+	index += binary.PutUvarint(out, uint64(h.ValueLen))
+	index += binary.PutUvarint(out, uint64(h.Meta))
+	index += binary.PutUvarint(out, h.ExpiresAt)
 	return index
 }
 
 func (h *WalHeader) Decode(reader *HashReader) (int, error) {
-	var err error
-
-	klen, err := binary.ReadUvarint(reader)
+	kLen, err := binary.ReadUvarint(reader)
 	if err != nil {
 		return 0, err
 	}
-	h.KeyLen = uint32(klen)
+	h.KeyLen = uint32(kLen)
 
-	vlen, err := binary.ReadUvarint(reader)
+	vLen, err := binary.ReadUvarint(reader)
 	if err != nil {
 		return 0, err
 	}
-	h.ValueLen = uint32(vlen)
+	h.ValueLen = uint32(vLen)
 
 	meta, err := binary.ReadUvarint(reader)
 	if err != nil {
 		return 0, err
 	}
 	h.Meta = byte(meta)
-	h.ExpiresAt, err = binary.ReadUvarint(reader)
+
+	expireAt, err := binary.ReadUvarint(reader)
 	if err != nil {
 		return 0, err
 	}
+	h.ExpiresAt = expireAt
 	return reader.BytesRead, nil
 }
 
@@ -74,27 +74,28 @@ func (h *WalHeader) Decode(reader *HashReader) (int, error) {
 // | header | key | value | crc32 |
 func WalCodec(buf *bytes.Buffer, e *Entry) int {
 	buf.Reset()
-	h := WalHeader{
+	walHeader := &WalHeader{
 		KeyLen:    uint32(len(e.Key)),
 		ValueLen:  uint32(len(e.Value)),
+		Meta:      e.Meta,
 		ExpiresAt: e.ExpiresAt,
 	}
-
 	hash := crc32.New(CastagnoliCrcTable)
 	writer := io.MultiWriter(buf, hash)
 
-	// encode header.
-	var headerEnc [maxHeaderSize]byte
-	sz := h.Encode(headerEnc[:])
-	Panic2(writer.Write(headerEnc[:sz]))
+	headBuf := make([]byte, maxHeaderSize)
+	sz := walHeader.Encode(headBuf)
+
+	Panic2(writer.Write(headBuf[:sz]))
 	Panic2(writer.Write(e.Key))
 	Panic2(writer.Write(e.Value))
-	// write crc32 hash.
-	var crcBuf [crc32.Size]byte
-	binary.BigEndian.PutUint32(crcBuf[:], hash.Sum32())
+
+	crcBuf := make([]byte, crc32.Size)
+	crcSum := hash.Sum32()
+	binary.BigEndian.PutUint32(crcBuf[:], crcSum)
+
 	Panic2(buf.Write(crcBuf[:]))
-	// return encoded length.
-	return len(headerEnc[:sz]) + len(e.Key) + len(e.Value) + len(crcBuf)
+	return sz + len(e.Key) + len(e.Value) + len(crcBuf)
 }
 
 // EstimateWalCodecSize 预估当前kv 写入wal文件占用的空间大小

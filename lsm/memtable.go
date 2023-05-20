@@ -94,25 +94,25 @@ func (m *memTable) Size() int64 {
 	return m.sl.MemSize()
 }
 
-//recovery
+// recovery
 func (lsm *LSM) recovery() (*memTable, []*memTable) {
-	// 从 工作目录中获取所有文件
 	files, err := ioutil.ReadDir(lsm.option.WorkDir)
 	if err != nil {
 		utils.Panic(err)
 		return nil, nil
 	}
+
 	var fids []uint64
 	maxFid := lsm.levels.maxFID
-	// 识别 后缀为.wal的文件
+
 	for _, file := range files {
 		if !strings.HasSuffix(file.Name(), walFileExt) {
 			continue
 		}
 		fsz := len(file.Name())
+
 		fid, err := strconv.ParseUint(file.Name()[:fsz-len(walFileExt)], 10, 64)
-		// 考虑 wal文件的存在 更新maxFid
-		if maxFid < fid {
+		if fid > maxFid {
 			maxFid = fid
 		}
 		if err != nil {
@@ -121,12 +121,12 @@ func (lsm *LSM) recovery() (*memTable, []*memTable) {
 		}
 		fids = append(fids, fid)
 	}
-	// 排序一下子
-	sort.Slice(fids, func(i, j int) bool {
+
+	sort.Slice(fids, func(i int, j int) bool {
 		return fids[i] < fids[j]
 	})
-	imms := []*memTable{}
-	// 遍历fid 做处理
+
+	var memTables []*memTable
 	for _, fid := range fids {
 		mt, err := lsm.openMemTable(fid)
 		utils.CondPanic(err != nil, err)
@@ -134,12 +134,10 @@ func (lsm *LSM) recovery() (*memTable, []*memTable) {
 			// mt.DecrRef()
 			continue
 		}
-		// TODO 如果最后一个跳表没写满会怎么样？这不就浪费空间了吗
-		imms = append(imms, mt)
+
+		memTables = append(memTables, mt)
 	}
-	// 更新最终的maxfid，初始化一定是串行执行的，因此不需要原子操作
-	lsm.levels.maxFID = maxFid
-	return lsm.NewMemtable(), imms
+	return lsm.NewMemtable(), memTables
 }
 
 func (lsm *LSM) openMemTable(fid uint64) (*memTable, error) {
