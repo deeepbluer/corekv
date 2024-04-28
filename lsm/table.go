@@ -387,5 +387,6 @@ func decrRefs(tables []*table) error {
 			return err
 		}
 	}
+	fmt.Println("test message")
 	return nil
 }
